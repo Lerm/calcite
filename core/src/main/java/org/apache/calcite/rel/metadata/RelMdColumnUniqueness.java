@@ -43,6 +43,7 @@ import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.util.BuiltInMethod;
 import org.apache.calcite.util.ImmutableBitSet;
+import org.apache.calcite.util.Pair;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
@@ -150,10 +151,40 @@ public class RelMdColumnUniqueness {
       Correlate rel,
       ImmutableBitSet columns,
       boolean ignoreNulls) {
-    return RelMetadataQuery.areColumnsUnique(
-        rel.getLeft(),
-        columns,
-        ignoreNulls);
+    switch (rel.getJoinType()) {
+    case ANTI:
+    case SEMI:
+      return RelMetadataQuery.areColumnsUnique(
+             rel.getLeft(),
+             columns,
+             ignoreNulls);
+    case LEFT:
+    case INNER:
+      final Pair<ImmutableBitSet, ImmutableBitSet> leftAndRightColumns =
+              splitLeftAndRightColumns(rel.getLeft().getRowType().getFieldCount(), columns);
+      final ImmutableBitSet leftColumns = leftAndRightColumns.left;
+      final ImmutableBitSet rightColumns = leftAndRightColumns.right;
+      final RelNode left = rel.getLeft();
+      final RelNode right = rel.getRight();
+
+      if ((leftColumns.cardinality() > 0)
+              && (rightColumns.cardinality() > 0)) {
+        Boolean leftUnique =
+                RelMetadataQuery.areColumnsUnique(left, leftColumns, ignoreNulls);
+        Boolean rightUnique =
+                RelMetadataQuery.areColumnsUnique(right, rightColumns, ignoreNulls);
+        if ((leftUnique == null) || (rightUnique == null)) {
+          return null;
+        } else {
+          return leftUnique && rightUnique;
+        }
+      } else {
+        return null;
+      }
+    default:
+      throw new IllegalStateException("Unknown join type " + rel.getJoinType()
+              + " for correlate relation " + rel);
+    }
   }
 
   public Boolean areColumnsUnique(
@@ -230,24 +261,16 @@ public class RelMdColumnUniqueness {
 
     // Divide up the input column mask into column masks for the left and
     // right sides of the join
-    ImmutableBitSet.Builder leftBuilder = ImmutableBitSet.builder();
-    ImmutableBitSet.Builder rightBuilder = ImmutableBitSet.builder();
-    int nLeftColumns = left.getRowType().getFieldCount();
-    for (int bit : columns) {
-      if (bit < nLeftColumns) {
-        leftBuilder.set(bit);
-      } else {
-        rightBuilder.set(bit - nLeftColumns);
-      }
-    }
+    final Pair<ImmutableBitSet, ImmutableBitSet> leftAndRightColumns =
+            splitLeftAndRightColumns(rel.getLeft().getRowType().getFieldCount(), columns);
+    final ImmutableBitSet leftColumns = leftAndRightColumns.left;
+    final ImmutableBitSet rightColumns = leftAndRightColumns.right;
 
     // If the original column mask contains columns from both the left and
     // right hand side, then the columns are unique if and only if they're
     // unique for their respective join inputs
-    final ImmutableBitSet leftColumns = leftBuilder.build();
     Boolean leftUnique =
         RelMetadataQuery.areColumnsUnique(left, leftColumns, ignoreNulls);
-    final ImmutableBitSet rightColumns = rightBuilder.build();
     Boolean rightUnique =
         RelMetadataQuery.areColumnsUnique(right, rightColumns, ignoreNulls);
     if ((leftColumns.cardinality() > 0)
@@ -384,6 +407,23 @@ public class RelMdColumnUniqueness {
           return r instanceof Aggregate || r instanceof Project;
         }
       };
+
+  /** Split columns set between left and right sets. */
+  private static Pair<ImmutableBitSet, ImmutableBitSet> splitLeftAndRightColumns(
+          final int nLeftColumns,
+          final ImmutableBitSet columns
+  ) {
+    ImmutableBitSet.Builder leftBuilder = ImmutableBitSet.builder();
+    ImmutableBitSet.Builder rightBuilder = ImmutableBitSet.builder();
+    for (int bit : columns) {
+      if (bit < nLeftColumns) {
+        leftBuilder.set(bit);
+      } else {
+        rightBuilder.set(bit - nLeftColumns);
+      }
+    }
+    return Pair.of(leftBuilder.build(), rightBuilder.build());
+  }
 }
 
 // End RelMdColumnUniqueness.java
